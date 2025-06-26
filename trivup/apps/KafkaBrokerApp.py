@@ -326,7 +326,11 @@ class KafkaBrokerApp (trivup.App):
                 if oidcapp is not None:
                     assert self.version >= [3, 1, 0], "OIDC requires Apache Kafka 3.1 or later"  # noqa: E501
                     # Use the OIDC method.
-                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerValidatorCallbackHandler')  # noqa: E501
+                    if self.version >= [4, 0, 0]:
+                        conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler')  # noqa: E501
+                        self.env_add('KAFKA_OPTS', '-Dorg.apache.kafka.sasl.oauthbearer.allowed.urls=%s' % oidcapp.conf['jwks_url'])  # noqa: E501
+                    else:
+                        conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerValidatorCallbackHandler')  # noqa: E501
                     conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.oauthbearer.jwks.endpoint.url=%s' % oidcapp.conf['jwks_url'])  # noqa: E501
                     conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.oauthbearer.scope.claim.name=scp')  # noqa: E501
                     conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required unsecuredLoginStringClaim_sub="unused";')  # noqa: E501
@@ -338,11 +342,8 @@ class KafkaBrokerApp (trivup.App):
                     # admin'
                     # Change requiredScope to something else to trigger auth
                     # error.
-                    jaas_blob.append('org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required')  # noqa: E501
-                    jaas_blob.append('  unsecuredLoginLifetimeSeconds="3600"')
-                    jaas_blob.append('  unsecuredLoginStringClaim_sub="admin"')
-                    jaas_blob.append('  unsecuredValidatorRequiredScope="requiredScope"')  # noqa: E501
-                    jaas_blob.append(';')
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required '  # noqa: E501
+                                     'unsecuredLoginStringClaim_sub="admin" unsecuredLoginLifetimeSeconds="3600" unsecuredValidatorRequiredScope="requiredScope";')  # noqa: E501
 
             jaas_blob.append('};\n')
             self.conf['jaas_file'] = self.create_file('jaas_broker.conf',

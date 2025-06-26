@@ -55,7 +55,11 @@ class Cluster (object):
         # Generate a uuid for this cluster, may be used as see fit by Apps.
         # The uuid is Base64-encoded (without padding) to match the
         # Kafka randomUuid format.
-        self.uuid = urlsafe_b64encode(uuid4().bytes).decode('utf-8').strip('=')
+        self.uuid = None
+        # Avoid UUIDs that look like command line options
+        while not self.uuid or self.uuid.startswith('-'):
+            self.uuid = (urlsafe_b64encode(uuid4().bytes)
+                         .decode('utf-8').strip('='))
         self.instance = str(int(time.time()))[2:]
         self.nodes = dict()
         for n in nodes:

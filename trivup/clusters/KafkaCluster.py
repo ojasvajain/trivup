@@ -71,8 +71,8 @@ class KafkaCluster(object):
     # conf dict structure with defaults:
     # commented-out fields are not defaults but show what is available.
     default_conf = {
-        'version': '2.8.0',     # Apache Kafka version
-        'cp_version': '6.1.0',  # Confluent Platform version (for SR)
+        'version': '3.9.0',     # Apache Kafka version
+        'cp_version': '7.9.0',  # Confluent Platform version (for SR)
         'broker_cnt': 3,
         'sasl_mechanism': '',   # GSSAPI, PLAIN, SCRAM-.., ...
         'realm_cnt': 1,
@@ -135,6 +135,14 @@ class KafkaCluster(object):
             elif self.sasl_mechanism.upper() != 'OAUTHBEARER':
                 raise RuntimeError('OIDC requires sasl.mechanism OAUTHBEARER,'
                                    f' not \'{self.sasl_mechanism}\'')
+            self.env['OAUTHBEARER_CLIENT_PRIVATE_KEY'] = \
+                self.oidc.conf['sasl_oauthbearer_client_private_key_path']
+            self.env['OAUTHBEARER_CLIENT_PRIVATE_KEY_ENCRYPTED'] = \
+                self.oidc.conf[
+                    'sasl_oauthbearer_client_private_key_encrypted_path']
+            self.env['OAUTHBEARER_CLIENT_PRIVATE_KEY_PASSWORD'] = \
+                self.oidc.conf[
+                    'sasl_oauthbearer_client_private_key_password']
         else:
             self.oidc = None
 

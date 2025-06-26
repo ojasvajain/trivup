@@ -1,3 +1,7 @@
+# 0.13.0
+
+* Support for JWT bearer grant type in OauthbearerOIDCApp
+
 # 0.12.10
 
  * Added kafka download url related to scala 2.13. Starting kafka v4.0.0, only scala >2.13 is supported.

@@ -28,24 +28,32 @@
 
 from trivup import trivup
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-from jwcrypto import jwk
-import python_jwt as jwt
-from datetime import datetime, timedelta
+import time
+from jwcrypto import jwk, jwt
 from threading import Lock
 
 import json
 import argparse
 import requests
+import os
+import base64
+import tempfile
+import urllib
 
 VALID_SCOPES = ['test', 'test-scope', 'api://1234-abcd/.default']
 
 
 class WebServerHandler(BaseHTTPRequestHandler):
-    def __init__(self):
+
+    JWT_BEARER_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:jwt-bearer'
+
+    def __init__(self, client_public_key=None):
         self._key = None
         self._public_keys = []
         self._mutex = Lock()
+        self.public_key = None
+        if client_public_key:
+            self.public_key = self.parse_jwk(client_public_key)
 
     def __call__(self, *args, **kwargs):
         """
@@ -73,7 +81,7 @@ class WebServerHandler(BaseHTTPRequestHandler):
     def update_keys(self):
         self._mutex.acquire()
         if len(self._public_keys) == 0:
-            public_key, key = self.generate_public_key()
+            public_key, key = WebServerHandler.generate_public_key()
             self._public_keys.append(json.loads(public_key))
             self._key = key
         self._mutex.release()
@@ -103,32 +111,32 @@ class WebServerHandler(BaseHTTPRequestHandler):
         keys = {"keys": self._public_keys}
         self.wfile.write(json.dumps(keys, indent=4).encode())
 
-    def generate_token(self, lifetime, valid=True):
-        self.update_keys()
-        private_pem = self._key.export_to_pem(private_key=True, password=None)
-        private_key = jwk.JWK.from_pem(private_pem)
-
+    @staticmethod
+    def generate_token(key, lifetime, valid=True):
+        now = int(time.time())
         payload = {
-            'exp': datetime.utcnow() + timedelta(days=0, seconds=lifetime),
-            'iat': datetime.utcnow(),
+            'exp': now + lifetime,
+            'iat': now,
             'iss': "issuer",
             'sub': "subject",
             'aud': 'api://default'
         }
         header = {
-            "kid": "abcdefg"
+            "kid": "abcdefg",
+            "alg": "RS256"
         }
-
-        token = jwt.generate_jwt(payload, private_key, 'RS256',
-                                 timedelta(seconds=lifetime),
-                                 other_headers=header)
+        jwt_token = jwt.JWT(header=header, claims=payload,
+                            algs=['RS256'])
+        jwt_token.make_signed_token(key)
+        token = jwt_token.serialize(compact=True)
         if not valid:
             token += "invalid"
 
         token_map = {"access_token": "%s" % token}
         return token_map
 
-    def generate_public_key(self):
+    @staticmethod
+    def generate_public_key():
 
         key = jwk.JWK.generate(kty='RSA', size=2048, alg='RS256',
                                use='sig', kid="abcdefg")
@@ -136,14 +144,62 @@ class WebServerHandler(BaseHTTPRequestHandler):
         public_key = key.export_public()
         return (public_key, key)
 
-    def valid_post_data(self, post_data):
+    def generate_key_and_token(self, lifetime, valid=True):
+        self.update_keys()
+        return WebServerHandler.generate_token(self._key, lifetime, valid)
+
+    def parse_jwk(self, jwk_bytes):
+        return jwk.JWK(**json.loads(jwk_bytes))
+
+    def valid_post_data_jwt_bearer(self, post_data):
+        if self.public_key is None:
+            self.send_error(500,
+                            'public key is missing')
+            return False
+
+        scope = post_data.get('scope', None)
+        if scope is not None and scope[0] not in VALID_SCOPES:
+            self.send_error(400,
+                            'Invalid scope \"%s\", scope should be one of %s' %
+                            (scope[0], VALID_SCOPES))
+            return False
+
+        assertion = post_data.get('assertion', None)
+        if assertion is None:
+            self.send_error(400,
+                            'assertion field is required in data')
+            return False
+
+        assertion = assertion[0]
+        try:
+            jwt_assertion = jwt.JWT()
+            jwt_assertion.deserialize(assertion, key=self.public_key)
+            claims = json.loads(jwt_assertion.claims)
+            return 'sub' in claims and len(claims['sub']) > 0
+        except Exception as e:
+            self.send_error(400,
+                            'Invalid assertion: %s' % str(e))
+
+        return False
+
+    def valid_post_data(self, post_data, has_authorization=True):
         if post_data is None:
             self.send_error(400,
-                            'grant_type=client_credentials and scope \
-                             fields are required in data')
+                            'grant_type field is required')
             return False
 
         post_data = post_data.decode("utf-8")
+        parsed_post_data = urllib.parse.parse_qs(post_data)
+        if 'grant_type' in parsed_post_data \
+            and parsed_post_data['grant_type'][0] == \
+                WebServerHandler.JWT_BEARER_GRANT_TYPE:
+            return self.valid_post_data_jwt_bearer(parsed_post_data)
+
+        # Authorization header is required for client_credentials
+        # grant type
+        if not has_authorization:
+            self.send_error(400, 'Authorization field is required')
+            return False
 
         if post_data == "grant_type=client_credentials":
             return True
@@ -187,21 +243,19 @@ class WebServerHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
 
-        if self.headers.get('Authorization', None) is None:
-            self.send_error(400, 'Authorization field is required')
-            return
+        has_authorization = 'Authorization' in self.headers
 
         if self.headers.get('Accept', None) != "application/json":
             self.send_error(400, 'Accept field should be "application/json"')
             return
 
-        if not self.valid_post_data(post_data):
+        if not self.valid_post_data(post_data, has_authorization):
             return
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
-        token = self.generate_token(4)
+        token = self.generate_key_and_token(60)
         self.wfile.write(json.dumps(token, indent=4).encode())
 
     def generate_badformat_token_for_client(self):
@@ -209,7 +263,7 @@ class WebServerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
 
-        token = self.generate_token(30, False)
+        token = self.generate_key_and_token(30, False)
         self.wfile.write(json.dumps(token, indent=4).encode())
 
     def generate_expired_token_for_client(self):
@@ -217,7 +271,7 @@ class WebServerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
 
-        token = self.generate_token(-1)
+        token = self.generate_key_and_token(-1)
         self.wfile.write(json.dumps(token, indent=4).encode())
 
     def do_POST(self):
@@ -232,27 +286,19 @@ class WebServerHandler(BaseHTTPRequestHandler):
 
 
 class OauthbearerOIDCHttpServer():
-    def run_http_server(self, port):
-        handler = WebServerHandler()
+    def run_http_server(self, port, client_public_key_path=None):
+        client_public_key = None
+        if client_public_key_path:
+            with open(client_public_key_path, 'r') as public_key:
+                client_public_key = public_key.read()
+        handler = WebServerHandler(client_public_key)
         server = HTTPServer(('localhost', port), handler)
         server.serve_forever()
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Trivup Oauthbearer OIDC \
-                                                  HTTP server')
-    parser.add_argument('--port', type=int, dest='port',
-                        required=True,
-                        help='Port at which OauthbearerOIDCApp \
-                              should be bound')
-    args = parser.parse_args()
-
-    http_server = OauthbearerOIDCHttpServer()
-    http_server.run_http_server(args.port)
-
-
 class OauthbearerOIDCApp (trivup.App):
     """ Oauth/OIDC app, run a http server """
+
     def __init__(self, cluster, conf=None, on=None):
         """
         @param cluster     Current cluster.
@@ -263,6 +309,29 @@ class OauthbearerOIDCApp (trivup.App):
         @param on          Node name to run on.
         """
         super(OauthbearerOIDCApp, self).__init__(cluster, conf=conf, on=on)
+        public_key, key = WebServerHandler.generate_public_key()
+        random_bytes = os.urandom(8)
+        private_key_password = base64.b64encode(random_bytes)
+        public_key_file_path = None
+        private_key_file_path = None
+        private_key_encrypted_file_path = None
+        with (tempfile.NamedTemporaryFile(delete=False) as public_key_file,
+              tempfile.NamedTemporaryFile(delete=False) as private_key_file,
+              tempfile.NamedTemporaryFile(delete=False)
+                as private_key_file_encrypted):
+
+            public_key_file.write(str(public_key).encode())
+            public_key_file_path = public_key_file.name
+
+            private_key_file.write(key.export_to_pem(private_key=True,
+                                                     password=None))
+            private_key_file_path = private_key_file.name
+
+            private_key_file_encrypted.write(key.export_to_pem(
+                private_key=True,
+                password=private_key_password))
+            private_key_encrypted_file_path = private_key_file_encrypted.name
+
         self.conf['port'] = trivup.TcpPortAllocator(self.cluster).next(
             self, port_base=self.conf.get('port', None))
         self.conf['valid_url'] = 'http://localhost:%d/retrieve' % \
@@ -275,13 +344,23 @@ class OauthbearerOIDCApp (trivup.App):
         self.conf['sasl_oauthbearer_method'] = 'OIDC'
         self.conf['sasl_oauthbearer_client_id'] = '123'
         self.conf['sasl_oauthbearer_client_secret'] = 'abc'
+        self.conf['sasl_oauthbearer_client_private_key_path'] = \
+            private_key_file_path
+        self.conf['sasl_oauthbearer_client_private_key_encrypted_path'] = \
+            private_key_encrypted_file_path
+        self.conf['sasl_oauthbearer_client_private_key_password'] = \
+            private_key_password
+        self.conf['sasl_oauthbearer_client_public_key_path'] = \
+            public_key_file_path
         self.conf['sasl_oauthbearer_scope'] = 'test'
         self.conf['sasl_oauthbearer_extensions'] = \
             'ExtensionworkloadIdentity=develC348S,Extensioncluster=lkc123'
 
     def start_cmd(self):
-        return "python3 -m trivup.apps.OauthbearerOIDCApp --port %d" \
-               % self.conf['port']
+        return "python3 -m trivup.apps.OauthbearerOIDCApp --port %d " \
+            "--client-public-key %s" \
+               % (self.conf['port'],
+                  self.conf['sasl_oauthbearer_client_public_key_path'])
 
     def operational(self):
         self.dbg('Checking if %s is operational' % self.get('valid_url'))
@@ -296,3 +375,64 @@ class OauthbearerOIDCApp (trivup.App):
 
     def deploy(self):
         pass
+
+
+def client_authentication_test(port, test_client_authentication_type):
+    if test_client_authentication_type == 'private_key_encrypted':
+        client_private_key_encrypted_path = os.environ[
+            'OAUTHBEARER_CLIENT_PRIVATE_KEY_ENCRYPTED']
+        client_private_key_password = os.environ[
+            'OAUTHBEARER_CLIENT_PRIVATE_KEY_PASSWORD']
+        with open(client_private_key_encrypted_path, 'rb') as private_key_file:
+            private_key = jwk.JWK.from_pem(
+                private_key_file.read(),
+                password=client_private_key_password.encode())
+    elif test_client_authentication_type == 'private_key_plaintext':
+        client_private_key_path = os.environ['OAUTHBEARER_CLIENT_PRIVATE_KEY']
+        with open(client_private_key_path, 'rb') as private_key_file:
+            private_key = jwk.JWK.from_pem(
+                private_key_file.read(),
+                password=None)
+    else:
+        raise Exception('Invalid test_client_authentication_type value: %s' %
+                        test_client_authentication_type)
+
+    assertion_token = WebServerHandler.generate_token(
+        private_key, 60, True)['access_token']
+    post_data = urllib.parse.urlencode(
+        {'grant_type': WebServerHandler.JWT_BEARER_GRANT_TYPE,
+         'assertion': assertion_token})
+    bearer_token = requests.post(
+        f'http://localhost:{port}/retrieve',
+        data=post_data,
+        headers={'Content-Type': 'application/x-www-form-urlencoded',
+                 'Accept': 'application/json'}).text
+    print(bearer_token)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Trivup Oauthbearer OIDC \
+                                                  HTTP server')
+    parser.add_argument('--port', type=int, dest='port',
+                        required=True,
+                        help='Port at which OauthbearerOIDCApp \
+                              should be bound')
+    parser.add_argument('--client-public-key', type=str,
+                        dest='client_public_key',
+                        required=False,
+                        help=('Public key path for authentication '
+                              'with assertions'))
+    parser.add_argument('--test-client-authentication',
+                        choices=['private_key_encrypted',
+                                 'private_key_plaintext'],
+                        default=None,
+                        required=False,
+                        help=('Calls the server and authenticates using'
+                              'the private key in environment variables'))
+    args = parser.parse_args()
+
+    if args.test_client_authentication:
+        client_authentication_test(args.port, args.test_client_authentication)
+    else:
+        http_server = OauthbearerOIDCHttpServer()
+        http_server.run_http_server(args.port, args.client_public_key)
