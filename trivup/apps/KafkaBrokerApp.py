@@ -326,19 +326,15 @@ class KafkaBrokerApp (trivup.App):
                 if oidcapp is not None:
                     assert self.version >= [3, 1, 0], "OIDC requires Apache Kafka 3.1 or later"  # noqa: E501
                     # Use the OIDC method.
-                    jwks_url = oidcapp.conf['jwks_url']
                     if self.version >= [4, 0, 0]:
-                        self.env_add('KAFKA_OPTS', f'-Dorg.apache.kafka.sasl.oauthbearer.allowed.urls={jwks_url}')  # noqa: E501
-
-                    for endpoint in ['sasl_plaintext', 'sasl_ssl']:
-                        if self.version >= [4, 0, 0]:
-                            conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler')  # noqa: E501
-                        else:
-                            conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerValidatorCallbackHandler')  # noqa: E501
-                        conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.oauthbearer.jwks.endpoint.url={jwks_url}')  # noqa: E501
-                        conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.oauthbearer.scope.claim.name=scp')  # noqa: E501
-                        conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required unsecuredLoginStringClaim_sub="unused";')  # noqa: E501
-                        conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.oauthbearer.expected.audience=api://default')  # noqa: E501
+                        conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler')  # noqa: E501
+                        self.env_add('KAFKA_OPTS', '-Dorg.apache.kafka.sasl.oauthbearer.allowed.urls=%s' % oidcapp.conf['jwks_url'])  # noqa: E501
+                    else:
+                        conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerValidatorCallbackHandler')  # noqa: E501
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.oauthbearer.jwks.endpoint.url=%s' % oidcapp.conf['jwks_url'])  # noqa: E501
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.oauthbearer.scope.claim.name=scp')  # noqa: E501
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required unsecuredLoginStringClaim_sub="unused";')  # noqa: E501
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.oauthbearer.expected.audience=api://default')  # noqa: E501
                 else:
                     # Use the unsecure JSON web token.
                     # Client should be configured with
@@ -346,9 +342,8 @@ class KafkaBrokerApp (trivup.App):
                     # admin'
                     # Change requiredScope to something else to trigger auth
                     # error.
-                    for endpoint in ['sasl_plaintext', 'sasl_ssl']:
-                        conf_blob.append(f'listener.name.{endpoint}.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required '  # noqa: E501
-                                         'unsecuredLoginStringClaim_sub="admin" unsecuredLoginLifetimeSeconds="3600" unsecuredValidatorRequiredScope="requiredScope";')  # noqa: E501
+                    conf_blob.append('listener.name.sasl_plaintext.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required '  # noqa: E501
+                                     'unsecuredLoginStringClaim_sub="admin" unsecuredLoginLifetimeSeconds="3600" unsecuredValidatorRequiredScope="requiredScope";')  # noqa: E501
 
             jaas_blob.append('};\n')
             self.conf['jaas_file'] = self.create_file('jaas_broker.conf',
@@ -452,85 +447,85 @@ class KafkaBrokerApp (trivup.App):
         self.kraft_setup_storage()
 
     def configure_fips_mode(self):
-        """
-        Configure Kafka broker for FIPS mode by modifying the configuration file.
-        This method:
-        1. Adds FIPS-related configuration fields
-        2. Removes non-SSL listeners
-        3. Removes non-SSL references from protocol map
-        4. Updates controller listener to use SASL_SSL
-        5. Ensures only TLSv1.2 is enabled
-        """
-        conf_file = self.conf['conf_file']
-        self.dbg('Configuring Kafka for FIPS mode: %s' % conf_file)
+    """
+    Configure Kafka broker for FIPS mode by modifying the configuration file.
+    This method:
+    1. Adds FIPS-related configuration fields
+    2. Removes non-SSL listeners
+    3. Removes non-SSL references from protocol map
+    4. Updates controller listener to use SASL_SSL
+    5. Ensures only TLSv1.2 is enabled
+    """
+    conf_file = self.conf['conf_file']
+    self.dbg('Configuring Kafka for FIPS mode: %s' % conf_file)
 
-        # Read the current configuration
-        with open(conf_file, 'r') as f:
-            lines = f.readlines()
+    # Read the current configuration
+    with open(conf_file, 'r') as f:
+        lines = f.readlines()
 
-        # Process and modify configuration lines
-        modified_lines = []
-        for line in lines:
-            # Remove non-SSL listeners from listeners configuration, but keep CONTROLLER
-            if line.startswith('listeners='):
-                listeners = line.split('=', 1)[1].strip().split(',')
-                ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
-                if ssl_listeners:
-                    modified_lines.append('listeners=' + ','.join(ssl_listeners) + '\n')
-                else:
-                    modified_lines.append(line)
-            # Remove non-SSL listeners from advertised.listeners, but keep CONTROLLER
-            elif line.startswith('advertised.listeners='):
-                listeners = line.split('=', 1)[1].strip().split(',')
-                ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
-                if ssl_listeners:
-                    modified_lines.append('advertised.listeners=' + ','.join(ssl_listeners) + '\n')
-                else:
-                    modified_lines.append(line)
-            # Update protocol map to only include SSL protocols and CONTROLLER
-            elif line.startswith('listener.security.protocol.map='):
-                protocol_map = line.split('=', 1)[1].strip().split(',')
-                ssl_protocols = [p for p in protocol_map if ('SSL' in p or 'CONTROLLER' in p)]
-                if ssl_protocols:
-                    modified_lines.append('listener.security.protocol.map=' + ','.join(ssl_protocols) + '\n')
-                else:
-                    modified_lines.append(line)
-
-            # Ensure only TLSv1.2 is enabled
-            elif line.startswith('ssl.enabled.protocols='):
-                modified_lines.append('ssl.enabled.protocols=TLSv1.2\n')
-            # Change inter-broker protocol from SASL_PLAINTEXT to SASL_SSL
-            elif line.startswith('security.inter.broker.protocol='):
-                if 'SASL_PLAINTEXT' in line:
-                    modified_lines.append('security.inter.broker.protocol=SASL_SSL\n')
-                else:
-                    modified_lines.append(line)
+    # Process and modify configuration lines
+    modified_lines = []
+    for line in lines:
+        # Remove non-SSL listeners from listeners configuration, but keep CONTROLLER
+        if line.startswith('listeners='):
+            listeners = line.split('=', 1)[1].strip().split(',')
+            ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
+            if ssl_listeners:
+                modified_lines.append('listeners=' + ','.join(ssl_listeners) + '\n')
+            else:
+                modified_lines.append(line)
+        # Remove non-SSL listeners from advertised.listeners, but keep CONTROLLER
+        elif line.startswith('advertised.listeners='):
+            listeners = line.split('=', 1)[1].strip().split(',')
+            ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
+            if ssl_listeners:
+                modified_lines.append('advertised.listeners=' + ','.join(ssl_listeners) + '\n')
+            else:
+                modified_lines.append(line)
+        # Update protocol map to only include SSL protocols and CONTROLLER
+        elif line.startswith('listener.security.protocol.map='):
+            protocol_map = line.split('=', 1)[1].strip().split(',')
+            ssl_protocols = [p for p in protocol_map if ('SSL' in p or 'CONTROLLER' in p)]
+            if ssl_protocols:
+                modified_lines.append('listener.security.protocol.map=' + ','.join(ssl_protocols) + '\n')
             else:
                 modified_lines.append(line)
 
-        # Write back the modified configuration
-        with open(conf_file, 'w') as f:
-            f.writelines(modified_lines)
+        # Ensure only TLSv1.2 is enabled
+        elif line.startswith('ssl.enabled.protocols='):
+            modified_lines.append('ssl.enabled.protocols=TLSv1.2\n')
+        # Change inter-broker protocol from SASL_PLAINTEXT to SASL_SSL
+        elif line.startswith('security.inter.broker.protocol='):
+            if 'SASL_PLAINTEXT' in line:
+                modified_lines.append('security.inter.broker.protocol=SASL_SSL\n')
+            else:
+                modified_lines.append(line)
+        else:
+            modified_lines.append(line)
 
-        # Append FIPS-specific configuration
-        with open(conf_file, 'a') as f:
-            f.writelines([
-                'enable.fips=true\n',
-                'enable.fips.mode=fips-140-3\n',
-                'confluent.security.bc.approved.mode.enable=true\n'
-            ])
+    # Write back the modified configuration
+    with open(conf_file, 'w') as f:
+        f.writelines(modified_lines)
 
-        # Update protocol map to use SASL_SSL for controller
-        with open(conf_file, 'r') as f:
-            content = f.read()
+    # Append FIPS-specific configuration
+    with open(conf_file, 'a') as f:
+        f.writelines([
+            'enable.fips=true\n',
+            'enable.fips.mode=fips-140-3\n',
+            'confluent.security.bc.approved.mode.enable=true\n'
+        ])
 
-        # Replace CONTROLLER:SASL_PLAINTEXT with CONTROLLER:SASL_SSL
-        content = content.replace('CONTROLLER:SASL_PLAINTEXT', 'CONTROLLER:SASL_SSL')
+    # Update protocol map to use SASL_SSL for controller
+    with open(conf_file, 'r') as f:
+        content = f.read()
 
-        with open(conf_file, 'w') as f:
-            f.write(content)
+    # Replace CONTROLLER:SASL_PLAINTEXT with CONTROLLER:SASL_SSL
+    content = content.replace('CONTROLLER:SASL_PLAINTEXT', 'CONTROLLER:SASL_SSL')
 
-        self.dbg('FIPS mode configuration completed')
+    with open(conf_file, 'w') as f:
+        f.write(content)
+
+    self.dbg('FIPS mode configuration completed')
 
     def deploy(self):
         destdir = os.path.join(self.cluster.mkpath(self.__class__.__name__),
