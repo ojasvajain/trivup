@@ -86,30 +86,88 @@ class WebServerHandler(BaseHTTPRequestHandler):
             self._key = key
         self._mutex.release()
 
+    def validate_metadata_authentication_azure_imds(self, parsed_get_data):
+        if 'client_id' not in parsed_get_data:
+            self.send_error(400,
+                            'client_id field is required in query parameters')
+            return False
+
+        if 'resource' not in parsed_get_data:
+            self.send_error(400,
+                            'resource field is required in query parameters')
+            return False
+
+        if 'api-version' not in parsed_get_data:
+            self.send_error(400,
+                            'api-version field is required in query parameters'
+                            )
+            return False
+
+        metadata_header = self.headers.get('Metadata', None)
+        if metadata_header is None or metadata_header.lower() != 'true':
+            self.send_error(400, 'Metadata header must be set to "true"')
+            return False
+
+        return True
+
+    def validate_metadata_authentication(self):
+        if self.headers.get('Accept', None) != "application/json":
+            self.send_error(400, 'Accept field should be "application/json"')
+            return False
+
+        _, after_params = self.path.split('?', 1)
+        parsed_get_data = urllib.parse.parse_qs(after_params)
+        if '__metadata_authentication_type' not in parsed_get_data:
+            self.send_error(400,
+                            '__metadata_authentication_type field is '
+                            'required in query parameters')
+            return False
+
+        metadata_authentication_type = \
+            parsed_get_data['__metadata_authentication_type'][0]
+        if metadata_authentication_type != 'azure_imds':
+            self.send_error(400,
+                            '__metadata_authentication_type is not '
+                            'a supported type')
+            return False
+
+        return self.validate_metadata_authentication_azure_imds(
+            parsed_get_data)
+
     def do_GET(self):
-        if not self.path.endswith("/keys"):
+        if self.path.endswith("/keys"):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            message = "HTTP server for OAuth\n"
-            message += "Example for token retrieval:\n"
-            message += 'curl \
-            -X POST \
-            --url localhost:PORT/retrieve \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -H "Authorization: Basic LW4gYWJjMTIzOlMzY3IzdCEK \
-                (base64 string generated from CLIENT_ID:CLIENT_SECRET)" \
-            -d "grant_type=client_credentials,scope=test-scope"'
-            self.wfile.write(message.encode())
+            self.update_keys()
+            keys = {"keys": self._public_keys}
+            self.wfile.write(json.dumps(keys, indent=4).encode())
+            return
+        elif self.path.startswith("/retrieve?"):
+            if not self.validate_metadata_authentication():
+                return
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            token = self.generate_key_and_token(60)
+            self.wfile.write(json.dumps(token, indent=4).encode())
             return
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
-        self.update_keys()
-        keys = {"keys": self._public_keys}
-        self.wfile.write(json.dumps(keys, indent=4).encode())
+        message = "HTTP server for OAuth\n"
+        message += "Example for token retrieval:\n"
+        message += 'curl \
+        -X POST \
+        --url localhost:PORT/retrieve \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -H "Authorization: Basic LW4gYWJjMTIzOlMzY3IzdCEK \
+            (base64 string generated from CLIENT_ID:CLIENT_SECRET)" \
+        -d "grant_type=client_credentials,scope=test-scope"'
+        self.wfile.write(message.encode())
 
     @staticmethod
     def generate_token(key, lifetime, valid=True):
@@ -377,7 +435,28 @@ class OauthbearerOIDCApp (trivup.App):
         pass
 
 
+def client_authentication_test_metadata(port, test_client_authentication_type):
+    if test_client_authentication_type != 'metadata_authentication_azure_imds':
+        raise Exception('Invalid test_client_authentication_type value: %s' %
+                        test_client_authentication_type)
+
+    bearer_token = requests.get(
+        f'http://localhost:{port}/retrieve',
+        params={'__metadata_authentication_type': 'azure_imds',
+                'client_id': '1234-abcd',
+                'resource': 'api://1234-abcd',
+                'api-version': '2021-01-01'},
+        headers={'Accept': 'application/json', 'Metadata': 'true'}).text
+    print(bearer_token)
+
+
 def client_authentication_test(port, test_client_authentication_type):
+    if test_client_authentication_type.startswith('metadata_authentication'):
+        return \
+            client_authentication_test_metadata(port,
+                                                test_client_authentication_type
+                                                )
+
     if test_client_authentication_type == 'private_key_encrypted':
         client_private_key_encrypted_path = os.environ[
             'OAUTHBEARER_CLIENT_PRIVATE_KEY_ENCRYPTED']
@@ -424,11 +503,12 @@ if __name__ == '__main__':
                               'with assertions'))
     parser.add_argument('--test-client-authentication',
                         choices=['private_key_encrypted',
-                                 'private_key_plaintext'],
+                                 'private_key_plaintext',
+                                 'metadata_authentication_azure_imds'],
                         default=None,
                         required=False,
                         help=('Calls the server and authenticates using'
-                              'the private key in environment variables'))
+                              'the environment variables'))
     args = parser.parse_args()
 
     if args.test_client_authentication:
