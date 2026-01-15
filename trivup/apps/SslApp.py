@@ -99,11 +99,15 @@ class SslApp (trivup.App):
                'der': self.mkpath('ca_%s.der' % cn),
                'password': self.conf.get('ssl_key_pass')}
 
-        self.dbg('Generating CA cert for %s in %s' % (cn, ret['pem']))
-        self.exec_cmd('openssl req -new -x509 -keyout "%s" -out "%s" -days 10000 -passin "pass:%s" -passout "pass:%s" -subj "%s"' %  # noqa: E501
-                      (ret['key'], ret['pem'],
-                       ret['password'], ret['password'],
-                       self.mksubj(cn)))
+        self.dbg('Generating CA cert and private key for %s in %s' % (cn, ret['pem']))
+        # Generate private key
+        self.exec_cmd('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -aes-256-cbc -out "%s" -pass "pass:%s"'
+                      % (ret['key'], ret['password']))
+
+        # Generate CA cert and use private key to sign it
+        self.exec_cmd('openssl req -new -x509 -key "%s" -out "%s" -days 10000 -passin "pass:%s" -subj "%s"'
+                      % (ret['key'], ret['pem'], ret['password'], self.mksubj(cn)))
+
 
         self.dbg('Convert CA PEM to DER')
         self.exec_cmd('openssl x509 -outform der -in "%s" -out "%s"' %
@@ -256,14 +260,14 @@ yes""" % d
         password = self.conf.get('ssl_key_pass')
         ret = {
             'intermediate_priv': {'pem':
-                                  self.mkpath('%s-intermediate-priv.pem' % cn),
+                                      self.mkpath('%s-intermediate-priv.pem' % cn),
                                   'der':
-                                  self.mkpath('%s-intermediate-priv.der'
-                                              % cn)},
+                                      self.mkpath('%s-intermediate-priv.der'
+                                                  % cn)},
             'intermediate_pub': {'pem':
-                                 self.mkpath('%s-intermediate-pub.pem' % cn),
+                                     self.mkpath('%s-intermediate-pub.pem' % cn),
                                  'der':
-                                 self.mkpath('%s-intermediate-pub.der' % cn)},
+                                     self.mkpath('%s-intermediate-pub.der' % cn)},
             'intermediate_req': self.mkpath('%s-intermediate.req' % cn),
         }
 
@@ -324,7 +328,12 @@ yes""" % d
         password = self.conf.get('ssl_key_pass')
 
         self.dbg('Creating PKCS#12 for %s in %s' % (cn, ret['pkcs']))
-        self.exec_cmd('openssl pkcs12 -export -descert -out "%s" -inkey "%s" -in "%s"  -passin "pass:%s" -passout "pass:%s"' %  # noqa: E501
+        # self.exec_cmd('openssl pkcs12 -export -descert -out "%s" -inkey "%s" -in "%s"  -passin "pass:%s" -passout "pass:%s"' %  # noqa: E501
+        #               (ret['pkcs'],
+        #                ret['priv']['pem'],
+        #                ret['pub']['pem'],
+        #                password, password))
+        self.exec_cmd('openssl pkcs12 -export -nomac -out "%s" -inkey "%s" -in "%s"  -passin "pass:%s" -passout "pass:%s"' %  # noqa: E501
                       (ret['pkcs'],
                        ret['priv']['pem'],
                        ret['pub']['pem'],
