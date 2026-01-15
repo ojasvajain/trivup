@@ -416,10 +416,14 @@ class KafkaBrokerApp (trivup.App):
 
     def kraft_setup_storage(self):
         """ Set up KRaft storage """
-        cmd = '{}/kafka-storage.sh format -t {} -c {}'.format(
+        # Required only for running SASL SCRAM test suite but no harm in adding it for all test suites
+        scram_sub_cmd = "--add-scram 'SCRAM-SHA-512=[name=myuser,password=mypassword]' --add-scram 'SCRAM-SHA-512=[name=admin,password=admin]'"
+        cmd = '{}/kafka-storage.sh format -t {} -c {} {}'.format(
             self.conf['bindir'],
             self.cluster.uuid,
-            self.conf['conf_file'])
+            self.conf['conf_file'],
+            scram_sub_cmd
+        )
         self.dbg('KRaft: setting up storage with: {}'.format(cmd))
         r = os.system(cmd)
         if r != 0:
@@ -452,85 +456,85 @@ class KafkaBrokerApp (trivup.App):
         self.kraft_setup_storage()
 
     def configure_fips_mode(self):
-    """
-    Configure Kafka broker for FIPS mode by modifying the configuration file.
-    This method:
-    1. Adds FIPS-related configuration fields
-    2. Removes non-SSL listeners
-    3. Removes non-SSL references from protocol map
-    4. Updates controller listener to use SASL_SSL
-    5. Ensures only TLSv1.2 is enabled
-    """
-    conf_file = self.conf['conf_file']
-    self.dbg('Configuring Kafka for FIPS mode: %s' % conf_file)
+        """
+        Configure Kafka broker for FIPS mode by modifying the configuration file.
+        This method:
+        1. Adds FIPS-related configuration fields
+        2. Removes non-SSL listeners
+        3. Removes non-SSL references from protocol map
+        4. Updates controller listener to use SASL_SSL
+        5. Ensures only TLSv1.2 is enabled
+        """
+        conf_file = self.conf['conf_file']
+        self.dbg('Configuring Kafka for FIPS mode: %s' % conf_file)
 
-    # Read the current configuration
-    with open(conf_file, 'r') as f:
-        lines = f.readlines()
+        # Read the current configuration
+        with open(conf_file, 'r') as f:
+            lines = f.readlines()
 
-    # Process and modify configuration lines
-    modified_lines = []
-    for line in lines:
-        # Remove non-SSL listeners from listeners configuration, but keep CONTROLLER
-        if line.startswith('listeners='):
-            listeners = line.split('=', 1)[1].strip().split(',')
-            ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
-            if ssl_listeners:
-                modified_lines.append('listeners=' + ','.join(ssl_listeners) + '\n')
+        # Process and modify configuration lines
+        modified_lines = []
+        for line in lines:
+            # Remove non-SSL listeners from listeners configuration, but keep CONTROLLER
+            if line.startswith('listeners='):
+                listeners = line.split('=', 1)[1].strip().split(',')
+                ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
+                if ssl_listeners:
+                    modified_lines.append('listeners=' + ','.join(ssl_listeners) + '\n')
+                else:
+                    modified_lines.append(line)
+            # Remove non-SSL listeners from advertised.listeners, but keep CONTROLLER
+            elif line.startswith('advertised.listeners='):
+                listeners = line.split('=', 1)[1].strip().split(',')
+                ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
+                if ssl_listeners:
+                    modified_lines.append('advertised.listeners=' + ','.join(ssl_listeners) + '\n')
+                else:
+                    modified_lines.append(line)
+            # Update protocol map to only include SSL protocols and CONTROLLER
+            elif line.startswith('listener.security.protocol.map='):
+                protocol_map = line.split('=', 1)[1].strip().split(',')
+                ssl_protocols = [p for p in protocol_map if ('SSL' in p or 'CONTROLLER' in p)]
+                if ssl_protocols:
+                    modified_lines.append('listener.security.protocol.map=' + ','.join(ssl_protocols) + '\n')
+                else:
+                    modified_lines.append(line)
+
+            # Ensure only TLSv1.2 is enabled
+            elif line.startswith('ssl.enabled.protocols='):
+                modified_lines.append('ssl.enabled.protocols=TLSv1.2\n')
+            # Change inter-broker protocol from SASL_PLAINTEXT to SASL_SSL
+            elif line.startswith('security.inter.broker.protocol='):
+                if 'SASL_PLAINTEXT' in line:
+                    modified_lines.append('security.inter.broker.protocol=SASL_SSL\n')
+                else:
+                    modified_lines.append(line)
             else:
                 modified_lines.append(line)
-        # Remove non-SSL listeners from advertised.listeners, but keep CONTROLLER
-        elif line.startswith('advertised.listeners='):
-            listeners = line.split('=', 1)[1].strip().split(',')
-            ssl_listeners = [l for l in listeners if ('SSL' in l.split('://')[0] or 'CONTROLLER' in l.split('://')[0])]
-            if ssl_listeners:
-                modified_lines.append('advertised.listeners=' + ','.join(ssl_listeners) + '\n')
-            else:
-                modified_lines.append(line)
-        # Update protocol map to only include SSL protocols and CONTROLLER
-        elif line.startswith('listener.security.protocol.map='):
-            protocol_map = line.split('=', 1)[1].strip().split(',')
-            ssl_protocols = [p for p in protocol_map if ('SSL' in p or 'CONTROLLER' in p)]
-            if ssl_protocols:
-                modified_lines.append('listener.security.protocol.map=' + ','.join(ssl_protocols) + '\n')
-            else:
-                modified_lines.append(line)
 
-        # Ensure only TLSv1.2 is enabled
-        elif line.startswith('ssl.enabled.protocols='):
-            modified_lines.append('ssl.enabled.protocols=TLSv1.2\n')
-        # Change inter-broker protocol from SASL_PLAINTEXT to SASL_SSL
-        elif line.startswith('security.inter.broker.protocol='):
-            if 'SASL_PLAINTEXT' in line:
-                modified_lines.append('security.inter.broker.protocol=SASL_SSL\n')
-            else:
-                modified_lines.append(line)
-        else:
-            modified_lines.append(line)
+        # Write back the modified configuration
+        with open(conf_file, 'w') as f:
+            f.writelines(modified_lines)
 
-    # Write back the modified configuration
-    with open(conf_file, 'w') as f:
-        f.writelines(modified_lines)
+        # Append FIPS-specific configuration
+        with open(conf_file, 'a') as f:
+            f.writelines([
+                'enable.fips=true\n',
+                'enable.fips.mode=fips-140-3\n',
+                'confluent.security.bc.approved.mode.enable=true\n'
+            ])
 
-    # Append FIPS-specific configuration
-    with open(conf_file, 'a') as f:
-        f.writelines([
-            'enable.fips=true\n',
-            'enable.fips.mode=fips-140-3\n',
-            'confluent.security.bc.approved.mode.enable=true\n'
-        ])
+        # Update protocol map to use SASL_SSL for controller
+        with open(conf_file, 'r') as f:
+            content = f.read()
 
-    # Update protocol map to use SASL_SSL for controller
-    with open(conf_file, 'r') as f:
-        content = f.read()
+        # Replace CONTROLLER:SASL_PLAINTEXT with CONTROLLER:SASL_SSL
+        content = content.replace('CONTROLLER:SASL_PLAINTEXT', 'CONTROLLER:SASL_SSL')
 
-    # Replace CONTROLLER:SASL_PLAINTEXT with CONTROLLER:SASL_SSL
-    content = content.replace('CONTROLLER:SASL_PLAINTEXT', 'CONTROLLER:SASL_SSL')
+        with open(conf_file, 'w') as f:
+            f.write(content)
 
-    with open(conf_file, 'w') as f:
-        f.write(content)
-
-    self.dbg('FIPS mode configuration completed')
+        self.dbg('FIPS mode configuration completed')
 
     def deploy(self):
         destdir = os.path.join(self.cluster.mkpath(self.__class__.__name__),
@@ -578,14 +582,23 @@ class KafkaBrokerApp (trivup.App):
             with open(self.conf['conf_file'], 'r') as f:
                 conf_content = f.read()
 
-            # Check if configuration contains SSL in security protocol
-            if 'SSL' in conf_content and ('listener.security.protocol.map' in conf_content):
+            # Check if configuration contains SSL in listeners or advertised.listeners
+            ssl_configured = False
+            for line in conf_content.splitlines():
+                if line.startswith('listeners=') or line.startswith('advertised.listeners='):
+                    if 'SSL' in line:
+                        ssl_configured = True
+                        break
+
+            if ssl_configured:
                 self.configure_fips_mode()
-                ce_kafka_path = os.getenv('CE_KAFKA_PATH')
-                self.conf['start_cmd'] = 'cd %s && bazel run //bin:kafka-server-start -- %s' % (ce_kafka_path, self.conf['conf_file'])
-            else:
-                self.conf['start_cmd'] = '%s/bin/kafka-server-start.sh %s' % \
-                                     (destdir, self.conf['conf_file'])
+
+            ce_kafka_path = os.getenv('CE_KAFKA_PATH')
+            self.conf['start_cmd'] = 'cd %s && bazel run //bin:kafka-server-start -- %s' % (ce_kafka_path,
+                                                                                            self.conf['conf_file'])
+                # self.conf['start_cmd'] = '%s/bin/kafka-server-start.sh %s' % \
+                #                      (destdir, self.conf['conf_file'])
+
 
 
             # Override start command with updated path.
